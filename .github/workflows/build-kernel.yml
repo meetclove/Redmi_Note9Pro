@@ -1,6 +1,5 @@
 name: Build Gauguin Kernel
 
-# 触发方式：手动触发 + push到main分支
 on:
   workflow_dispatch:
     inputs:
@@ -25,7 +24,7 @@ on:
         required: true
         default: 'master'
       ENABLE_LTO:
-        description: '启用 LTO 优化 (可能增加编译时间)'
+        description: '启用 LTO 优化 (实验性)'
         required: false
         default: 'false'
         type: boolean
@@ -35,28 +34,21 @@ on:
         default: ''
 
 env:
-  # ── 工具链版本 ──────────────────────────────────────────────
-  # Neutron Clang: 高质量 LLVM 工具链，支持 4.19 内核
-  CLANG_VERSION: "19"
-  # ── 编译目标架构 ─────────────────────────────────────────────
   ARCH: arm64
   SUBARCH: arm64
-  # ── 输出目录 ─────────────────────────────────────────────────
   OUT_DIR: out
+  AOSP_CLANG_URL: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r416183b.tar.gz"
 
 jobs:
   build:
     name: 编译 Gauguin 内核
     runs-on: ubuntu-22.04
-    # 最长运行 4 小时（内核编译通常 30-90 分钟）
     timeout-minutes: 240
 
     steps:
-      # ── 1. 检出当前仓库（存放脚本配置用）─────────────────────
       - name: 检出构建仓库
         uses: actions/checkout@v4
 
-      # ── 2. 安装系统依赖 ──────────────────────────────────────
       - name: 安装编译依赖
         run: |
           sudo apt-get update -qq
@@ -72,9 +64,9 @@ jobs:
             cpio \
             lz4 \
             zstd \
-            libzstd-dev
+            libzstd-dev \
+            device-tree-compiler
 
-      # ── 3. 设置 ccache（加速二次编译）──────────────────────────
       - name: 配置 ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -82,146 +74,130 @@ jobs:
           restore-keys: gauguin-kernel-
           max-size: 10G
 
-      # ── 4. 克隆 Neutron Clang 工具链 ──────────────────────────
-      - name: 下载 Neutron Clang 工具链
+      - name: 下载 AOSP Clang 工具链
         run: |
-          mkdir -p ${{ github.workspace }}/toolchain/neutron-clang
+          mkdir -p ${{ github.workspace }}/toolchain/aosp-clang
+          echo "glibc:"
+          ldd --version | head -n1
 
-          # 获取最新 release 信息
-          NEUTRON_RELEASE=$(curl -s "https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tag_name'])")
-          echo "Neutron Clang 最新版本: $NEUTRON_RELEASE"
-
-          # 下载对应 tarball
           wget -q --show-progress \
-            "https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/${NEUTRON_RELEASE}/neutron-clang-${NEUTRON_RELEASE}.tar.zst" \
-            -O /tmp/neutron-clang.tar.zst
+            "${{ env.AOSP_CLANG_URL }}" \
+            -O /tmp/aosp-clang.tar.gz
 
-          # 解压
-          tar --use-compress-program=unzstd \
-            -xf /tmp/neutron-clang.tar.zst \
-            -C ${{ github.workspace }}/toolchain/neutron-clang
-          rm /tmp/neutron-clang.tar.zst
+          tar -xzf /tmp/aosp-clang.tar.gz \
+            -C ${{ github.workspace }}/toolchain/aosp-clang
 
-          # 验证
-          ${{ github.workspace }}/toolchain/neutron-clang/bin/clang --version
+          rm -f /tmp/aosp-clang.tar.gz
 
-      # ── 5. 克隆内核源码 ──────────────────────────────────────
+          ${{ github.workspace }}/toolchain/aosp-clang/bin/clang --version
+
       - name: 克隆内核源码
         run: |
           echo "克隆 ${{ github.event.inputs.KERNEL_SOURCE }} 分支: ${{ github.event.inputs.KERNEL_BRANCH }}"
           git clone \
             --depth=1 \
-            --branch ${{ github.event.inputs.KERNEL_BRANCH }} \
-            ${{ github.event.inputs.KERNEL_SOURCE }} \
-            ${{ github.workspace }}/kernel_source
+            --branch "${{ github.event.inputs.KERNEL_BRANCH }}" \
+            "${{ github.event.inputs.KERNEL_SOURCE }}" \
+            "${{ github.workspace }}/kernel_source"
+
           echo "内核源码克隆完成"
-          cd ${{ github.workspace }}/kernel_source
+          cd "${{ github.workspace }}/kernel_source"
           echo "内核版本: $(make kernelversion 2>/dev/null || echo '未知')"
 
-      # ── 6. 克隆 AnyKernel3（打包刷机包用）────────────────────
       - name: 克隆 AnyKernel3
         run: |
           git clone \
             --depth=1 \
-            --branch ${{ github.event.inputs.ANYKERNEL_BRANCH }} \
-            ${{ github.event.inputs.ANYKERNEL_SOURCE }} \
-            ${{ github.workspace }}/AnyKernel3
-          # 清理不需要的文件
-          rm -rf ${{ github.workspace }}/AnyKernel3/.git
+            --branch "${{ github.event.inputs.ANYKERNEL_BRANCH }}" \
+            "${{ github.event.inputs.ANYKERNEL_SOURCE }}" \
+            "${{ github.workspace }}/AnyKernel3"
+          rm -rf "${{ github.workspace }}/AnyKernel3/.git"
 
-      # ── 7. 编译内核 ──────────────────────────────────────────
       - name: 编译内核
         working-directory: ${{ github.workspace }}/kernel_source
+        shell: bash
         run: |
-          # 工具链路径
-          CLANG_DIR="${{ github.workspace }}/toolchain/neutron-clang"
-          PATH="${CLANG_DIR}/bin:${PATH}"
-          export PATH
+          set -o pipefail
 
-          # ccache 包装
+          CLANG_DIR="${{ github.workspace }}/toolchain/aosp-clang"
+          export PATH="${CLANG_DIR}/bin:${PATH}"
+
           export CC="ccache clang"
           export HOSTCC="ccache gcc"
           export HOSTCXX="ccache g++"
 
-          # ── 基础编译参数 ─────────────────────────────────────
+          mkdir -p "${OUT_DIR}"
+
           MAKE_ARGS=(
-            O=${OUT_DIR}
-            ARCH=${ARCH}
-            SUBARCH=${SUBARCH}
+            O="${OUT_DIR}"
+            ARCH="${ARCH}"
+            SUBARCH="${SUBARCH}"
             CC="ccache clang"
+            HOSTCC="ccache gcc"
+            HOSTCXX="ccache g++"
             CLANG_TRIPLE="aarch64-linux-gnu-"
-            CROSS_COMPILE="${CLANG_DIR}/bin/aarch64-linux-gnu-"
-            CROSS_COMPILE_ARM32="${CLANG_DIR}/bin/arm-linux-gnueabi-"
-            LD="${CLANG_DIR}/bin/ld.lld"
-            AR="${CLANG_DIR}/bin/llvm-ar"
-            NM="${CLANG_DIR}/bin/llvm-nm"
-            OBJCOPY="${CLANG_DIR}/bin/llvm-objcopy"
-            OBJDUMP="${CLANG_DIR}/bin/llvm-objdump"
-            READELF="${CLANG_DIR}/bin/llvm-readelf"
-            STRIP="${CLANG_DIR}/bin/llvm-strip"
+            CROSS_COMPILE="aarch64-linux-gnu-"
+            CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
+            LD="ld.lld"
+            AR="llvm-ar"
+            NM="llvm-nm"
+            OBJCOPY="llvm-objcopy"
+            OBJDUMP="llvm-objdump"
+            READELF="llvm-readelf"
+            STRIP="llvm-strip"
             LLVM=1
             LLVM_IAS=1
           )
 
-          # ── LTO 选项 ─────────────────────────────────────────
           if [ "${{ github.event.inputs.ENABLE_LTO }}" = "true" ]; then
             echo "启用 ThinLTO"
             MAKE_ARGS+=(CONFIG_LTO_CLANG=y CONFIG_THINLTO=y)
           fi
 
-          # ── 额外参数 ─────────────────────────────────────────
-          if [ -n "${{ github.event.inputs.EXTRA_CMDS }}" ]; then
-            echo "附加参数: ${{ github.event.inputs.EXTRA_CMDS }}"
-          fi
-
-          # ── 1. 生成 defconfig ─────────────────────────────────
           echo "================================================================"
-          echo " 步骤 1/3: 生成 defconfig (${{ github.event.inputs.KERNEL_DEFCONFIG }})"
+          echo "步骤 1/3: 生成 defconfig (${{ github.event.inputs.KERNEL_DEFCONFIG }})"
           echo "================================================================"
           make "${MAKE_ARGS[@]}" \
             ${{ github.event.inputs.EXTRA_CMDS }} \
-            ${{ github.event.inputs.KERNEL_DEFCONFIG }}
+            "${{ github.event.inputs.KERNEL_DEFCONFIG }}"
 
-          # ── 2. 编译内核 ───────────────────────────────────────
           echo "================================================================"
-          echo " 步骤 2/3: 开始编译（使用 $(nproc) 线程）"
+          echo "步骤 2/3: 开始编译（使用 $(nproc --all) 线程）"
           echo "================================================================"
           make "${MAKE_ARGS[@]}" \
             ${{ github.event.inputs.EXTRA_CMDS }} \
-            -j$(nproc --all) \
+            -j"$(nproc --all)" \
             2>&1 | tee /tmp/kernel_build.log
 
-          # ── 3. 检查编译结果 ───────────────────────────────────
           echo "================================================================"
-          echo " 步骤 3/3: 检查编译产物"
+          echo "步骤 3/3: 检查编译产物"
           echo "================================================================"
-          if [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz" ]; then
+          if [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz-dtb" ]; then
+            echo "✅ 编译成功！找到 Image.gz-dtb"
+            ls -lh "${OUT_DIR}/arch/arm64/boot"/Image*
+          elif [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz" ]; then
             echo "✅ 编译成功！找到 Image.gz"
-            ls -lh ${OUT_DIR}/arch/arm64/boot/Image* 2>/dev/null || true
-            ls -lh ${OUT_DIR}/arch/arm64/boot/*.gz 2>/dev/null || true
-            # 查找设备树
-            find ${OUT_DIR}/arch/arm64/boot/dts -name "*.dtb" 2>/dev/null | head -5 || true
-            find ${OUT_DIR}/arch/arm64/boot/ -name "dtbo.img" 2>/dev/null | head -3 || true
+            ls -lh "${OUT_DIR}/arch/arm64/boot"/Image*
           elif [ -f "${OUT_DIR}/arch/arm64/boot/Image" ]; then
-            echo "✅ 编译成功！找到 Image (未压缩)"
-            ls -lh ${OUT_DIR}/arch/arm64/boot/Image*
+            echo "✅ 编译成功！找到 Image"
+            ls -lh "${OUT_DIR}/arch/arm64/boot"/Image*
           else
             echo "❌ 未找到内核镜像！编译失败"
             echo "--- 最后 100 行日志 ---"
-            tail -100 /tmp/kernel_build.log
+            tail -100 /tmp/kernel_build.log || true
             exit 1
           fi
 
-      # ── 8. 打包 AnyKernel3 刷机包 ────────────────────────────
+          find "${OUT_DIR}/arch/arm64/boot" -maxdepth 3 \( -name "*.dtb" -o -name "dtbo.img" -o -name "dtb.img" \) 2>/dev/null | head -20 || true
+
       - name: 打包刷机包
+        shell: bash
         run: |
           KERNEL_DIR="${{ github.workspace }}/kernel_source/${OUT_DIR}/arch/arm64/boot"
           AK3_DIR="${{ github.workspace }}/AnyKernel3"
           BUILD_TIME=$(date '+%Y%m%d-%H%M')
 
           echo "复制内核镜像..."
-          # 优先使用 Image.gz-dtb（一体包），其次 Image.gz，最后 Image
           if [ -f "${KERNEL_DIR}/Image.gz-dtb" ]; then
             cp "${KERNEL_DIR}/Image.gz-dtb" "${AK3_DIR}/"
             echo "使用 Image.gz-dtb"
@@ -231,33 +207,32 @@ jobs:
           elif [ -f "${KERNEL_DIR}/Image" ]; then
             cp "${KERNEL_DIR}/Image" "${AK3_DIR}/"
             echo "使用 Image"
+          else
+            echo "未找到可打包的内核镜像"
+            exit 1
           fi
 
-          # 复制 dtbo.img（如果存在）
           if [ -f "${KERNEL_DIR}/dtbo.img" ]; then
             cp "${KERNEL_DIR}/dtbo.img" "${AK3_DIR}/"
             echo "包含 dtbo.img"
           fi
 
-          # 复制 dtb（如果存在独立的 dtb）
           if [ -f "${KERNEL_DIR}/dtb.img" ]; then
             cp "${KERNEL_DIR}/dtb.img" "${AK3_DIR}/dtb"
-            echo "包含 dtb"
+            echo "包含 dtb.img -> dtb"
           fi
 
-          # 打包 zip
           cd "${AK3_DIR}"
-          ZIP_NAME="Kernel-Gauguin-$(git -C ${{ github.workspace }}/kernel_source rev-parse --short HEAD)-${BUILD_TIME}.zip"
+          ZIP_NAME="Kernel-Gauguin-$(git -C "${{ github.workspace }}/kernel_source" rev-parse --short HEAD)-${BUILD_TIME}.zip"
           zip -r9 "${ZIP_NAME}" . \
             --exclude="*.zip" \
             --exclude=".git/*" \
             --exclude="README.md"
 
           echo "刷机包: ${ZIP_NAME}"
-          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
-          echo "AK3_DIR=${AK3_DIR}" >> $GITHUB_ENV
+          echo "ZIP_NAME=${ZIP_NAME}" >> "${GITHUB_ENV}"
+          echo "AK3_DIR=${AK3_DIR}" >> "${GITHUB_ENV}"
 
-      # ── 9. 上传构建产物 ──────────────────────────────────────
       - name: 上传内核镜像
         uses: actions/upload-artifact@v4
         with:
@@ -270,6 +245,7 @@ jobs:
           retention-days: 7
 
       - name: 上传 AnyKernel3 刷机包
+        if: env.ZIP_NAME != ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
@@ -284,7 +260,6 @@ jobs:
           path: /tmp/kernel_build.log
           retention-days: 3
 
-      # ── 10. 输出构建摘要 ─────────────────────────────────────
       - name: 输出构建摘要
         if: always()
         run: |
@@ -299,7 +274,7 @@ jobs:
           echo "| LTO | ${{ github.event.inputs.ENABLE_LTO }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 运行时间 | $(date) |" >> $GITHUB_STEP_SUMMARY
 
-          if [ -f "${{ github.workspace }}/AnyKernel3/${{ env.ZIP_NAME }}" ]; then
+          if [ -n "${{ env.ZIP_NAME }}" ] && [ -f "${{ github.workspace }}/AnyKernel3/${{ env.ZIP_NAME }}" ]; then
             echo "| 刷机包 | ✅ ${{ env.ZIP_NAME }} |" >> $GITHUB_STEP_SUMMARY
           else
             echo "| 刷机包 | ❌ 未生成 |" >> $GITHUB_STEP_SUMMARY
