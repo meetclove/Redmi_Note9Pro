@@ -1,4 +1,4 @@
-name: Build Gauguin 4.19 Sukisu-Ultra
+name: Build Gauguin 4.19 KSU
 on:
   workflow_dispatch:
 jobs:
@@ -9,6 +9,17 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Set swap to 10G
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: gauguin-fp16
+          max-size: 2G
+      
       - name: Setup Configuration
         run: |
           echo "KERNEL_DEFCONFIG=vendor/gauguin_user_defconfig" >> $GITHUB_ENV
@@ -22,10 +33,10 @@ jobs:
       - name: Download Toolchains
         run: |
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
-          wget https://github.com/ZyCromerZ/Clang/releases/download/11.1.0-20220724-release/Clang-11.1.0-20220724.tar.gz
+          wget https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20250721-release/Clang-16.0.6-20250721.tar.gz
           mkdir clang
           cd clang
-          tar -zvxf ../Clang-11.1.0-20220724.tar.gz
+          tar -zvxf ../Clang-16.0.6-20250721.tar.gz
 
       - name: Checkout Kernel Source
         run: |
@@ -65,4 +76,3 @@ jobs:
           name: Gauguin_4.19_${{ env.BUILD_TIME}}
           path: |
             project/out/arch/arm64/boot/*
-
