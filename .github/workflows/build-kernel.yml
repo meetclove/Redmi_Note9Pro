@@ -7,7 +7,6 @@ env:
   KERNEL_SOURCE: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
   KERNEL_BRANCH: gauguin-r-oss
   DEFCONFIG: vendor/gauguin_user_defconfig
-  ARCH: arm64
   ANYKERNEL3_URL: https://github.com/osm0sis/AnyKernel3
   ANYKERNEL3_BRANCH: master
 
@@ -22,6 +21,7 @@ jobs:
 
     - name: Setup Build Environment
       run: |
+        echo "安装编译环境依赖..."
         sudo apt-get update
         sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3
 
@@ -29,80 +29,68 @@ jobs:
       uses: hendrikmuhs/ccache-action@v1.2
       with:
         key: ${{ runner.os }}-kernel-gauguin-${{ env.KERNEL_BRANCH }}
-        max-size: 5G
+        max-size: 10G
 
-    - name: Download Clang & GCC Toolchains
+    - name: Download Clang & AOSP GCC Toolchains
       run: |
-        # 使用 Proton Clang，它对 4.19 内核支持非常好
+        echo "1. 拉取 Proton Clang (作为核心 C 编译器)..."
         git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+
+        echo "2. 拉取 LineageOS 官方 AOSP GCC 64-bit (提供原生的 as 和 ld)..."
+        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc-64
+
+        echo "3. 拉取 LineageOS 官方 AOSP GCC 32-bit (用于 VDSO 和 32 位兼容层编译)..."
+        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-32
 
     - name: Clone Kernel Source
       run: |
+        echo "拉取内核源码..."
         git clone --depth=1 --branch ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_SOURCE }} kernel-source
 
-    - name: Build Kernel
+    - name: Build Kernel (Clang + GCC)
       run: |
-        export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+        # 将 Clang 和原版 GCC 工具链全部加入环境变量
+        export PATH="$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc-64/bin:$GITHUB_WORKSPACE/gcc-32/bin:$PATH"
         cd kernel-source
         
-        # 【关键修复 1】强制删除工具链中那个不兼容的 'as'
-        # 这样执行 CC 时，Clang 找不到外部 as 就会老老实实用自己的 Integrated Assembler
-        rm -f $GITHUB_WORKSPACE/clang/bin/aarch64-linux-gnu-as
-        rm -f $GITHUB_WORKSPACE/clang/bin/arm-linux-gnueabi-as
-        rm -f $GITHUB_WORKSPACE/clang/bin/as
-
-        # 【关键修复 2】设置 Host 端的 CFLAGS 解决 yylloc 重复定义
+        # 修复 Ubuntu 22.04 Host GCC 11+ 的 dtc 编译 multiple definition 错误
         export HOSTCFLAGS="-fcommon"
         export HOSTLDFLAGS="-fcommon"
 
         export KBUILD_BUILD_USER="builder"
         export KBUILD_BUILD_HOST="github-actions"
 
-        # 定义全套 LLVM 工具链参数
-        # 这里的关键是把 AS 设置为 clang，并传入 --target
+        # 最关键的一步：指明使用 Clang，但交叉编译链使用 aarch64-linux-android- (即我们的 AOSP GCC)
         MAKE_ARGS=(
           ARCH=arm64
           O=out
           CC="ccache clang"
-          AS=clang
-          LD=ld.lld
-          AR=llvm-ar
-          NM=llvm-nm
-          OBJCOPY=llvm-objcopy
-          OBJDUMP=llvm-objdump
-          STRIP=llvm-strip
-          READELF=llvm-readelf
-          OBJSIZE=llvm-size
-          HOSTCC=gcc
-          HOSTCXX=g++
-          CROSS_COMPILE=aarch64-linux-gnu-
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           CLANG_TRIPLE=aarch64-linux-gnu-
-          LLVM=1
-          LLVM_IAS=1
+          CROSS_COMPILE=aarch64-linux-android-
+          CROSS_COMPILE_ARM32=arm-linux-androideabi-
         )
 
         echo "生成 defconfig..."
         make -j$(nproc --all) "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG }}
 
-        echo "开始正式编译..."
-        # 如果依然在 scripts/mod 报错，尝试在这里加上 V=1 看看详细命令
+        echo "开始正式混合编译内核..."
         make -j$(nproc --all) "${MAKE_ARGS[@]}"
-        
 
     - name: Package with AnyKernel3
       run: |
+        echo "开始打包 AnyKernel3..."
         git clone --depth=1 --branch ${{ env.ANYKERNEL3_BRANCH }} ${{ env.ANYKERNEL3_URL }} AnyKernel3
-        # 针对 4.19 内核，主要的产物通常是 Image.gz 和 dtb
-        find kernel-source/out/arch/arm64/boot -name "Image.gz" -exec cp {} AnyKernel3/ \;
+        
+        # 寻找内核产物
+        find kernel-source/out/arch/arm64/boot -name "Image.gz*" -exec cp {} AnyKernel3/ \;
         find kernel-source/out/arch/arm64/boot -name "dtb" -exec cp {} AnyKernel3/ \;
         find kernel-source/out/arch/arm64/boot -name "dtbo.img" -exec cp {} AnyKernel3/ \; || true
 
         cd AnyKernel3
-        zip -r9 ../AnyKernel3-gauguin.zip *
+        zip -r9 ../AnyKernel3-gauguin-${{ env.KERNEL_BRANCH }}.zip * -x .git README.md *placeholder
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: Kernel-RedmiNote9Pro-5G
-        path: AnyKernel3-gauguin.zip
+        name: AnyKernel3-gauguin-kernel
+        path: AnyKernel3-gauguin-${{ env.KERNEL_BRANCH }}.zip
