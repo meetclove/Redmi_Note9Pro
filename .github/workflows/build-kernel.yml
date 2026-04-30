@@ -15,7 +15,7 @@ on:
       KERNEL_DEFCONFIG:
         description: 'defconfig 文件名'
         required: true
-        default: 'vendor/gauguin_defconfig'
+        default: 'vendor/gauguin_user_defconfig'
       ANYKERNEL_SOURCE:
         description: 'AnyKernel3 仓库地址'
         required: true
