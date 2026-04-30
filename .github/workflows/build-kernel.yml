@@ -1,258 +1,87 @@
-name: Build Gauguin Kernel
+name: Build Xiaomi Kernel (gauguin)
 
 on:
-  workflow_dispatch:
-    inputs:
-      KERNEL_SOURCE:
-        description: '内核源码仓库地址'
-        required: true
-        default: 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource'
-      KERNEL_BRANCH:
-        description: '内核源码分支'
-        required: true
-        default: 'gauguin-r-oss'
-      KERNEL_DEFCONFIG:
-        description: 'defconfig 文件名'
-        required: true
-        default: 'vendor/gauguin_user_defconfig'
-      ANYKERNEL_SOURCE:
-        description: 'AnyKernel3 仓库地址'
-        required: true
-        default: 'https://github.com/osm0sis/AnyKernel3'
-      ANYKERNEL_BRANCH:
-        description: 'AnyKernel3 分支'
-        required: true
-        default: 'master'
-      ENABLE_LTO:
-        description: '启用 LTO 优化 (实验性)'
-        required: false
-        default: 'false'
-        type: boolean
-      EXTRA_CMDS:
-        description: '额外的 make 参数 (可留空)'
-        required: false
-        default: ''
+  workflow_dispatch: # 允许手动在 Actions 页面触发编译
 
 env:
+  # 内核源码配置
+  KERNEL_SOURCE: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
+  KERNEL_BRANCH: gauguin-r-oss # 如果是安卓12，建议确认是否应该是 gauguin-s-oss
+  DEFCONFIG: vendor/gauguin_user_defconfig # 请检查源码 arch/arm64/configs 下的具体名称，有时是 gauguin_defconfig
   ARCH: arm64
-  SUBARCH: arm64
-  OUT_DIR: out
-  CLANG_DIR: ${{ github.workspace }}/toolchain/clang
-  GCC64_DIR: ${{ github.workspace }}/toolchain/gcc64
-  GCC32_DIR: ${{ github.workspace }}/toolchain/gcc32
+  
+  # AnyKernel3 配置 (建议 fork 一个自己适配好 anykernel.sh 的仓库)
+  ANYKERNEL3_URL: https://github.com/osm0sis/AnyKernel3
+  ANYKERNEL3_BRANCH: master
 
 jobs:
   build:
-    name: 编译 Gauguin 内核
+    name: Build Kernel
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
 
     steps:
-      - name: 检出构建仓库
-        uses: actions/checkout@v4
+    - name: Checkout Code
+      uses: actions/checkout@v4
 
-      - name: 安装编译依赖
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            git curl wget zip unzip tar xz-utils \
-            bc bison flex libssl-dev libelf-dev \
-            make gcc g++ binutils patch \
-            python3 python3-pip \
-            ccache \
-            adb \
-            libncurses-dev \
-            kmod \
-            cpio \
-            lz4 \
-            zstd \
-            libzstd-dev \
-            device-tree-compiler
+    - name: Setup Build Environment
+      run: |
+        echo "安装编译所需的依赖包..."
+        sudo apt-get update
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3
 
-      - name: 配置 ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: gauguin-kernel-${{ github.run_id }}
-          restore-keys: gauguin-kernel-
-          max-size: 10G
+    - name: Setup ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ runner.os }}-kernel-gauguin-${{ env.KERNEL_BRANCH }}
+        max-size: 5G
 
-      - name: 下载工具链
-        run: |
-          mkdir -p "${{ env.CLANG_DIR }}" "${{ env.GCC64_DIR }}" "${{ env.GCC32_DIR }}"
+    - name: Download Clang & GCC Toolchains
+      run: |
+        echo "拉取 Proton Clang (内置 GCC 交叉编译工具链，非常适合 4.19 内核)..."
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
 
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang "${{ env.CLANG_DIR }}"
+    - name: Clone Kernel Source
+      run: |
+        echo "拉取内核源码..."
+        git clone --depth=1 --branch ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_SOURCE }} kernel-source
 
-          wget -q --show-progress \
-            "https://mirrors.edge.kernel.org/pub/tools/crosstool/files/bin/x86_64/11.3.0/x86_64-gcc-11.3.0-nolibc-aarch64-linux.tar.xz" \
-            -O /tmp/gcc64.tar.xz
-          tar -xJf /tmp/gcc64.tar.xz -C "${{ env.GCC64_DIR }}" --strip-components=1
-          rm -f /tmp/gcc64.tar.xz
+    - name: Build Kernel
+      run: |
+        export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+        cd kernel-source
+        
+        # 定义编译环境信息
+        export KBUILD_BUILD_USER="builder"
+        export KBUILD_BUILD_HOST="github-actions"
 
-          wget -q --show-progress \
-            "https://mirrors.edge.kernel.org/pub/tools/crosstool/files/bin/x86_64/11.3.0/x86_64-gcc-11.3.0-nolibc-arm-linux-gnueabi.tar.xz" \
-            -O /tmp/gcc32.tar.xz
-          tar -xJf /tmp/gcc32.tar.xz -C "${{ env.GCC32_DIR }}" --strip-components=1
-          rm -f /tmp/gcc32.tar.xz
+        echo "生成 defconfig..."
+        make -j$(nproc --all) O=out ARCH=${{ env.ARCH }} CC="ccache clang" \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          ${{ env.DEFCONFIG }}
 
-          "${{ env.CLANG_DIR }}/bin/clang" --version
+        echo "开始正式编译内核..."
+        make -j$(nproc --all) O=out ARCH=${{ env.ARCH }} CC="ccache clang" \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-      - name: 克隆内核源码
-        run: |
-          git clone \
-            --depth=1 \
-            --branch "${{ github.event.inputs.KERNEL_BRANCH }}" \
-            "${{ github.event.inputs.KERNEL_SOURCE }}" \
-            "${{ github.workspace }}/kernel_source"
+    - name: Package with AnyKernel3
+      run: |
+        echo "克隆 AnyKernel3 仓库..."
+        git clone --depth=1 --branch ${{ env.ANYKERNEL3_BRANCH }} ${{ env.ANYKERNEL3_URL }} AnyKernel3
+        
+        # 将编译产物复制到 AK3 目录
+        # 注: Redmi Note 9 Pro 5G 的打包文件通常是 Image.gz-dtb 或者 dtb + Image
+        echo "正在寻找并拷贝 Image/Image.gz 和 dtb/dtbo..."
+        find kernel-source/out/arch/arm64/boot -name "Image.gz*" -exec cp {} AnyKernel3/ \;
+        find kernel-source/out/arch/arm64/boot -name "dtb" -exec cp {} AnyKernel3/ \;
+        find kernel-source/out/arch/arm64/boot -name "dtbo.img" -exec cp {} AnyKernel3/ \; || true
 
-      - name: 修复源码兼容性
-        working-directory: ${{ github.workspace }}/kernel_source
-        shell: bash
-        run: |
-          set +e
+        cd AnyKernel3
+        zip -r9 AnyKernel3-gauguin-${{ env.KERNEL_BRANCH }}.zip * -x .git README.md *placeholder
 
-          if [ -f "scripts/dtc/dtc-lexer.l" ]; then
-            grep -q "YYLTYPE yylloc;" scripts/dtc/dtc-lexer.l
-            if [ $? -eq 0 ]; then
-              sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
-            fi
-          fi
-
-          if [ -d "drivers" ] || [ -d "fs" ] || [ -d "include" ] || [ -d "kernel" ] || [ -d "lib" ] || [ -d "mm" ] || [ -d "net" ] || [ -d "sound" ] || [ -d "techpack" ] || [ -d "vendor" ]; then
-            grep -Rnl "stpcpy(" drivers fs include kernel lib mm net sound techpack vendor 2>/dev/null | while read -r f; do
-              [ -f "$f" ] && sed -i 's/\bstpcpy\s*(/strcpy(/g' "$f"
-            done
-          fi
-
-          set -e
-
-      - name: 克隆 AnyKernel3
-        run: |
-          git clone \
-            --depth=1 \
-            --branch "${{ github.event.inputs.ANYKERNEL_BRANCH }}" \
-            "${{ github.event.inputs.ANYKERNEL_SOURCE }}" \
-            "${{ github.workspace }}/AnyKernel3"
-          rm -rf "${{ github.workspace }}/AnyKernel3/.git"
-
-      - name: 编译内核
-        working-directory: ${{ github.workspace }}/kernel_source
-        shell: bash
-        run: |
-          set -o pipefail
-
-          export PATH="${{ env.CLANG_DIR }}/bin:${{ env.GCC64_DIR }}/bin:${{ env.GCC32_DIR }}/bin:${PATH}"
-          export CC="ccache clang"
-          export HOSTCC="ccache gcc"
-          export HOSTCXX="ccache g++"
-          export HOSTCFLAGS="-fcommon"
-          export HOSTCXXFLAGS="-fcommon"
-
-          mkdir -p "${OUT_DIR}"
-
-          MAKE_ARGS=(
-            O="${OUT_DIR}"
-            ARCH="${ARCH}"
-            SUBARCH="${SUBARCH}"
-            CC="ccache clang"
-            HOSTCC="ccache gcc -fcommon"
-            HOSTCXX="ccache g++ -fcommon"
-            HOSTCFLAGS="-fcommon"
-            HOSTCXXFLAGS="-fcommon"
-            CLANG_TRIPLE="aarch64-linux-gnu-"
-            CROSS_COMPILE="aarch64-linux-"
-            CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
-            LD="${{ env.GCC64_DIR }}/bin/aarch64-linux-ld.bfd"
-            AR="llvm-ar"
-            NM="llvm-nm"
-            OBJCOPY="llvm-objcopy"
-            OBJDUMP="llvm-objdump"
-            READELF="llvm-readelf"
-            STRIP="llvm-strip"
-            LLVM_IAS=1
-          )
-
-          if [ "${{ github.event.inputs.ENABLE_LTO }}" = "true" ]; then
-            MAKE_ARGS+=(CONFIG_LTO_CLANG=y CONFIG_THINLTO=y)
-          fi
-
-          make "${MAKE_ARGS[@]}" \
-            ${{ github.event.inputs.EXTRA_CMDS }} \
-            "${{ github.event.inputs.KERNEL_DEFCONFIG }}"
-
-          make "${MAKE_ARGS[@]}" \
-            ${{ github.event.inputs.EXTRA_CMDS }} \
-            -j"$(nproc --all)" \
-            2>&1 | tee /tmp/kernel_build.log
-
-          if [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz-dtb" ]; then
-            ls -lh "${OUT_DIR}/arch/arm64/boot"/Image*
-          elif [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz" ]; then
-            ls -lh "${OUT_DIR}/arch/arm64/boot"/Image*
-          elif [ -f "${OUT_DIR}/arch/arm64/boot/Image" ]; then
-            ls -lh "${OUT_DIR}/arch/arm64/boot"/Image*
-          else
-            tail -100 /tmp/kernel_build.log || true
-            exit 1
-          fi
-
-      - name: 打包刷机包
-        shell: bash
-        run: |
-          KERNEL_DIR="${{ github.workspace }}/kernel_source/${OUT_DIR}/arch/arm64/boot"
-          AK3_DIR="${{ github.workspace }}/AnyKernel3"
-          BUILD_TIME=$(date '+%Y%m%d-%H%M')
-
-          if [ -f "${KERNEL_DIR}/Image.gz-dtb" ]; then
-            cp "${KERNEL_DIR}/Image.gz-dtb" "${AK3_DIR}/"
-          elif [ -f "${KERNEL_DIR}/Image.gz" ]; then
-            cp "${KERNEL_DIR}/Image.gz" "${AK3_DIR}/"
-          elif [ -f "${KERNEL_DIR}/Image" ]; then
-            cp "${KERNEL_DIR}/Image" "${AK3_DIR}/"
-          else
-            exit 1
-          fi
-
-          if [ -f "${KERNEL_DIR}/dtbo.img" ]; then
-            cp "${KERNEL_DIR}/dtbo.img" "${AK3_DIR}/"
-          fi
-
-          if [ -f "${KERNEL_DIR}/dtb.img" ]; then
-            cp "${KERNEL_DIR}/dtb.img" "${AK3_DIR}/dtb"
-          fi
-
-          cd "${AK3_DIR}"
-          ZIP_NAME="Kernel-Gauguin-$(git -C "${{ github.workspace }}/kernel_source" rev-parse --short HEAD)-${BUILD_TIME}.zip"
-          zip -r9 "${ZIP_NAME}" . \
-            --exclude="*.zip" \
-            --exclude=".git/*" \
-            --exclude="README.md"
-
-          echo "ZIP_NAME=${ZIP_NAME}" >> "${GITHUB_ENV}"
-          echo "AK3_DIR=${AK3_DIR}" >> "${GITHUB_ENV}"
-
-      - name: 上传内核镜像
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-images-${{ github.run_id }}
-          path: |
-            ${{ github.workspace }}/kernel_source/${{ env.OUT_DIR }}/arch/arm64/boot/Image*
-            ${{ github.workspace }}/kernel_source/${{ env.OUT_DIR }}/arch/arm64/boot/dtbo.img
-            ${{ github.workspace }}/kernel_source/${{ env.OUT_DIR }}/arch/arm64/boot/dtb.img
-          if-no-files-found: warn
-          retention-days: 7
-
-      - name: 上传 AnyKernel3 刷机包
-        if: env.ZIP_NAME != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ZIP_NAME }}
-          path: ${{ env.AK3_DIR }}/${{ env.ZIP_NAME }}
-          retention-days: 7
-
-      - name: 上传编译日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-${{ github.run_id }}
-          path: /tmp/kernel_build.log
-          retention-days: 3
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: AnyKernel3-gauguin-kernel
+        path: AnyKernel3/AnyKernel3-gauguin-${{ env.KERNEL_BRANCH }}.zip
