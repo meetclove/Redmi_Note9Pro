@@ -80,20 +80,14 @@ jobs:
         run: |
           mkdir -p "${{ env.CLANG_DIR }}" "${{ env.GCC64_DIR }}" "${{ env.GCC32_DIR }}"
 
-          echo "glibc:"
-          ldd --version | head -n1
-
-          echo "下载 Proton Clang"
           git clone --depth=1 https://github.com/kdrag0n/proton-clang "${{ env.CLANG_DIR }}"
 
-          echo "下载 GCC 64"
           wget -q --show-progress \
             "https://mirrors.edge.kernel.org/pub/tools/crosstool/files/bin/x86_64/11.3.0/x86_64-gcc-11.3.0-nolibc-aarch64-linux.tar.xz" \
             -O /tmp/gcc64.tar.xz
           tar -xJf /tmp/gcc64.tar.xz -C "${{ env.GCC64_DIR }}" --strip-components=1
           rm -f /tmp/gcc64.tar.xz
 
-          echo "下载 GCC 32"
           wget -q --show-progress \
             "https://mirrors.edge.kernel.org/pub/tools/crosstool/files/bin/x86_64/11.3.0/x86_64-gcc-11.3.0-nolibc-arm-linux-gnueabi.tar.xz" \
             -O /tmp/gcc32.tar.xz
@@ -101,21 +95,22 @@ jobs:
           rm -f /tmp/gcc32.tar.xz
 
           "${{ env.CLANG_DIR }}/bin/clang" --version
-          "${{ env.GCC64_DIR }}/bin/aarch64-linux-gcc" --version || true
-          "${{ env.GCC32_DIR }}/bin/arm-linux-gnueabi-gcc" --version || true
 
       - name: 克隆内核源码
         run: |
-          echo "克隆 ${{ github.event.inputs.KERNEL_SOURCE }} 分支: ${{ github.event.inputs.KERNEL_BRANCH }}"
           git clone \
             --depth=1 \
             --branch "${{ github.event.inputs.KERNEL_BRANCH }}" \
             "${{ github.event.inputs.KERNEL_SOURCE }}" \
             "${{ github.workspace }}/kernel_source"
 
-          echo "内核源码克隆完成"
-          cd "${{ github.workspace }}/kernel_source"
-          echo "内核版本: $(make kernelversion 2>/dev/null || echo '未知')"
+      - name: 修复 dtc yylloc 重定义
+        working-directory: ${{ github.workspace }}/kernel_source
+        shell: bash
+        run: |
+          if grep -q "YYLTYPE yylloc;" scripts/dtc/dtc-lexer.l 2>/dev/null; then
+            sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
+          fi
 
       - name: 克隆 AnyKernel3
         run: |
@@ -136,6 +131,8 @@ jobs:
           export CC="ccache clang"
           export HOSTCC="ccache gcc"
           export HOSTCXX="ccache g++"
+          export HOSTCFLAGS="-fcommon"
+          export HOSTCXXFLAGS="-fcommon"
 
           mkdir -p "${OUT_DIR}"
 
@@ -144,8 +141,10 @@ jobs:
             ARCH="${ARCH}"
             SUBARCH="${SUBARCH}"
             CC="ccache clang"
-            HOSTCC="ccache gcc"
-            HOSTCXX="ccache g++"
+            HOSTCC="ccache gcc -fcommon"
+            HOSTCXX="ccache g++ -fcommon"
+            HOSTCFLAGS="-fcommon"
+            HOSTCXXFLAGS="-fcommon"
             CLANG_TRIPLE="aarch64-linux-gnu-"
             CROSS_COMPILE="aarch64-linux-"
             CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
@@ -161,45 +160,28 @@ jobs:
           )
 
           if [ "${{ github.event.inputs.ENABLE_LTO }}" = "true" ]; then
-            echo "启用 ThinLTO"
             MAKE_ARGS+=(CONFIG_LTO_CLANG=y CONFIG_THINLTO=y)
           fi
 
-          echo "================================================================"
-          echo "步骤 1/3: 生成 defconfig (${{ github.event.inputs.KERNEL_DEFCONFIG }})"
-          echo "================================================================"
           make "${MAKE_ARGS[@]}" \
             ${{ github.event.inputs.EXTRA_CMDS }} \
             "${{ github.event.inputs.KERNEL_DEFCONFIG }}"
 
-          echo "================================================================"
-          echo "步骤 2/3: 开始编译（使用 $(nproc --all) 线程）"
-          echo "================================================================"
           make "${MAKE_ARGS[@]}" \
             ${{ github.event.inputs.EXTRA_CMDS }} \
             -j"$(nproc --all)" \
             2>&1 | tee /tmp/kernel_build.log
 
-          echo "================================================================"
-          echo "步骤 3/3: 检查编译产物"
-          echo "================================================================"
           if [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "✅ 编译成功！找到 Image.gz-dtb"
             ls -lh "${OUT_DIR}/arch/arm64/boot"/Image*
           elif [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz" ]; then
-            echo "✅ 编译成功！找到 Image.gz"
             ls -lh "${OUT_DIR}/arch/arm64/boot"/Image*
           elif [ -f "${OUT_DIR}/arch/arm64/boot/Image" ]; then
-            echo "✅ 编译成功！找到 Image"
             ls -lh "${OUT_DIR}/arch/arm64/boot"/Image*
           else
-            echo "❌ 未找到内核镜像！编译失败"
-            echo "--- 最后 100 行日志 ---"
             tail -100 /tmp/kernel_build.log || true
             exit 1
           fi
-
-          find "${OUT_DIR}/arch/arm64/boot" -maxdepth 3 \( -name "*.dtb" -o -name "dtbo.img" -o -name "dtb.img" \) 2>/dev/null | head -20 || true
 
       - name: 打包刷机包
         shell: bash
@@ -208,29 +190,22 @@ jobs:
           AK3_DIR="${{ github.workspace }}/AnyKernel3"
           BUILD_TIME=$(date '+%Y%m%d-%H%M')
 
-          echo "复制内核镜像..."
           if [ -f "${KERNEL_DIR}/Image.gz-dtb" ]; then
             cp "${KERNEL_DIR}/Image.gz-dtb" "${AK3_DIR}/"
-            echo "使用 Image.gz-dtb"
           elif [ -f "${KERNEL_DIR}/Image.gz" ]; then
             cp "${KERNEL_DIR}/Image.gz" "${AK3_DIR}/"
-            echo "使用 Image.gz"
           elif [ -f "${KERNEL_DIR}/Image" ]; then
             cp "${KERNEL_DIR}/Image" "${AK3_DIR}/"
-            echo "使用 Image"
           else
-            echo "未找到可打包的内核镜像"
             exit 1
           fi
 
           if [ -f "${KERNEL_DIR}/dtbo.img" ]; then
             cp "${KERNEL_DIR}/dtbo.img" "${AK3_DIR}/"
-            echo "包含 dtbo.img"
           fi
 
           if [ -f "${KERNEL_DIR}/dtb.img" ]; then
             cp "${KERNEL_DIR}/dtb.img" "${AK3_DIR}/dtb"
-            echo "包含 dtb.img -> dtb"
           fi
 
           cd "${AK3_DIR}"
@@ -240,7 +215,6 @@ jobs:
             --exclude=".git/*" \
             --exclude="README.md"
 
-          echo "刷机包: ${ZIP_NAME}"
           echo "ZIP_NAME=${ZIP_NAME}" >> "${GITHUB_ENV}"
           echo "AK3_DIR=${AK3_DIR}" >> "${GITHUB_ENV}"
 
@@ -270,23 +244,3 @@ jobs:
           name: build-log-${{ github.run_id }}
           path: /tmp/kernel_build.log
           retention-days: 3
-
-      - name: 输出构建摘要
-        if: always()
-        run: |
-          echo "## 🏗️ 构建摘要" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| 项目 | 内容 |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 设备代号 | gauguin (红米 Note 9 Pro 5G) |" >> $GITHUB_STEP_SUMMARY
-          echo "| 内核源码 | ${{ github.event.inputs.KERNEL_SOURCE }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 分支 | ${{ github.event.inputs.KERNEL_BRANCH }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| defconfig | ${{ github.event.inputs.KERNEL_DEFCONFIG }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| LTO | ${{ github.event.inputs.ENABLE_LTO }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 运行时间 | $(date) |" >> $GITHUB_STEP_SUMMARY
-
-          if [ -n "${{ env.ZIP_NAME }}" ] && [ -f "${{ github.workspace }}/AnyKernel3/${{ env.ZIP_NAME }}" ]; then
-            echo "| 刷机包 | ✅ ${{ env.ZIP_NAME }} |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| 刷机包 | ❌ 未生成 |" >> $GITHUB_STEP_SUMMARY
-          fi
