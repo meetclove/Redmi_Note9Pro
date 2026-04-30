@@ -43,25 +43,9 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
-
           wget -O clang.tar.gz https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20250721-release/Clang-16.0.6-20250721.tar.gz
           mkdir -p clang
           tar -xf clang.tar.gz -C clang --strip-components=1
-
-          echo "Toolchain layout:"
-          ls -lah gcc64/bin | head
-          ls -lah gcc32/bin | head
-          ls -lah clang/bin | head
-
-      - name: Show toolchain versions
-        run: |
-          export PATH=$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/gcc32/bin:$PATH
-          which clang || true
-          which aarch64-linux-android-gcc || true
-          which arm-linux-androideabi-gcc || true
-          clang --version || true
-          aarch64-linux-android-gcc --version || true
-          arm-linux-androideabi-gcc --version || true
 
       - name: Checkout kernel source
         run: |
@@ -75,7 +59,6 @@ jobs:
             echo "CONFIG_KSU_MANUAL_HOOK=y"
             echo "CONFIG_KSU_SUSFS=n"
           } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
-
           git apply ../ksu_hooks_sukisu_4.19.patch
 
       - name: Setup SukiSU-Ultra
@@ -87,11 +70,7 @@ jobs:
           git add .
           git commit -m "Integrate SukiSU-Ultra" || true
 
-      - name: Prepare out dir
-        run: |
-          mkdir -p project/out
-
-      - name: Build defconfig
+      - name: Build kernel
         run: |
           cd project
           export ARCH=arm64
@@ -104,27 +83,16 @@ jobs:
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
-            HOSTCC=clang \
-            CLANG_TRIPLE=aarch64-linux-android- \
+            HOSTCC=gcc \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             ${{ env.KERNEL_DEFCONFIG }}
-
-      - name: Build kernel
-        run: |
-          cd project
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export KBUILD_BUILD_USER=github
-          export KBUILD_BUILD_HOST=actions
-          export PATH=$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/gcc32/bin:$PATH
 
           make -j"$(nproc)" O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
-            HOSTCC=clang \
-            CLANG_TRIPLE=aarch64-linux-android- \
+            HOSTCC=gcc \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             V=1
@@ -132,7 +100,6 @@ jobs:
       - name: Show output files
         if: always()
         run: |
-          echo "Boot artifacts:"
           find project/out/arch/arm64/boot -maxdepth 3 -type f | sort || true
 
       - name: Upload kernel artifacts
