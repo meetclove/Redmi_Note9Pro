@@ -1,11 +1,15 @@
-name: Build Gauguin 4.19 KSU
+name: Build Gauguin 4.19 SukiSU-Ultra
+
 on:
   workflow_dispatch:
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout local repo
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
@@ -17,32 +21,53 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: gauguin-fp16
+          key: gauguin-4.19-sukisu-ultra
           max-size: 2G
-      
-      - name: Setup Configuration
+
+      - name: Setup environment variables
         run: |
           echo "KERNEL_DEFCONFIG=vendor/gauguin_user_defconfig" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(TZ=Asia/Shanghai date '+%Y%m%d%H%M')" >> $GITHUB_ENV
 
-      - name: Setup build kernel environment
+      - name: Install build dependencies
         run: |
-          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
           sudo apt-get update
-          sudo apt-get install git flex lzop bison make libssl-dev python3 python-is-python3 libncurses-dev
+          sudo apt-get install -y \
+            git curl wget flex bison lzop \
+            make bc cpio kmod xz-utils \
+            libssl-dev libelf-dev \
+            python3 python-is-python3 \
+            libncurses-dev rsync unzip ca-certificates
 
-      - name: Download Toolchains
+      - name: Download toolchains
         run: |
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
-          wget https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20250721-release/Clang-16.0.6-20250721.tar.gz
-          mkdir clang
-          cd clang
-          tar -zvxf ../Clang-16.0.6-20250721.tar.gz
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
 
-      - name: Checkout Kernel Source
+          wget -O clang.tar.gz https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20250721-release/Clang-16.0.6-20250721.tar.gz
+          mkdir -p clang
+          tar -xf clang.tar.gz -C clang --strip-components=1
+
+          echo "Toolchain layout:"
+          ls -lah gcc64/bin | head
+          ls -lah gcc32/bin | head
+          ls -lah clang/bin | head
+
+      - name: Show toolchain versions
+        run: |
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/gcc32/bin:$PATH
+          which clang || true
+          which aarch64-linux-android-gcc || true
+          which arm-linux-androideabi-gcc || true
+          clang --version || true
+          aarch64-linux-android-gcc --version || true
+          arm-linux-androideabi-gcc --version || true
+
+      - name: Checkout kernel source
         run: |
           git clone --depth=1 --branch gauguin-r-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource project
 
-      - name: Setup Patches
+      - name: Apply local patch
         run: |
           cd project
           {
@@ -50,6 +75,7 @@ jobs:
             echo "CONFIG_KSU_MANUAL_HOOK=y"
             echo "CONFIG_KSU_SUSFS=n"
           } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
+
           git apply ../ksu_hooks_sukisu_4.19.patch
 
       - name: Setup SukiSU-Ultra
@@ -59,20 +85,62 @@ jobs:
           git config --global user.email "bot@example.com"
           git config --global user.name "bot"
           git add .
-          git commit -m ksu
+          git commit -m "Integrate SukiSU-Ultra" || true
+
+      - name: Prepare out dir
+        run: |
+          mkdir -p project/out
+
+      - name: Build defconfig
+        run: |
+          cd project
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_USER=github
+          export KBUILD_BUILD_HOST=actions
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/gcc32/bin:$PATH
+
+          make O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            HOSTCC=clang \
+            CLANG_TRIPLE=aarch64-linux-android- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            ${{ env.KERNEL_DEFCONFIG }}
 
       - name: Build kernel
         run: |
           cd project
-          export PATH=$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/clang/bin:$PATH
           export ARCH=arm64
           export SUBARCH=arm64
-          make O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 ${{ env.KERNEL_DEFCONFIG }}
-          make -j$(nproc) O=out ARCH=arm64 SUBARCH=arm64 CC=clang HOSTCC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1
+          export KBUILD_BUILD_USER=github
+          export KBUILD_BUILD_HOST=actions
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/gcc32/bin:$PATH
 
-      - name: Upload the kernel zip
+          make -j"$(nproc)" O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            HOSTCC=clang \
+            CLANG_TRIPLE=aarch64-linux-android- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            V=1
+
+      - name: Show output files
+        if: always()
+        run: |
+          echo "Boot artifacts:"
+          find project/out/arch/arm64/boot -maxdepth 3 -type f | sort || true
+
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Gauguin_4.19_${{ env.BUILD_TIME}}
+          name: Gauguin_4.19_${{ env.BUILD_TIME }}
           path: |
-            project/out/arch/arm64/boot/*
+            project/out/arch/arm64/boot/Image*
+            project/out/arch/arm64/boot/dtbo.img
+            project/out/arch/arm64/boot/dts/**/*.dtb
+          if-no-files-found: warn
