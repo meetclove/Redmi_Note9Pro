@@ -1,120 +1,306 @@
-name: Build Gauguin 4.19 SukiSU-Ultra
+name: Build Gauguin Kernel
 
+# 触发方式：手动触发 + push到main分支
 on:
   workflow_dispatch:
+    inputs:
+      KERNEL_SOURCE:
+        description: '内核源码仓库地址'
+        required: true
+        default: 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource'
+      KERNEL_BRANCH:
+        description: '内核源码分支'
+        required: true
+        default: 'gauguin-r-oss'
+      KERNEL_DEFCONFIG:
+        description: 'defconfig 文件名'
+        required: true
+        default: 'vendor/gauguin_defconfig'
+      ANYKERNEL_SOURCE:
+        description: 'AnyKernel3 仓库地址'
+        required: true
+        default: 'https://github.com/osm0sis/AnyKernel3'
+      ANYKERNEL_BRANCH:
+        description: 'AnyKernel3 分支'
+        required: true
+        default: 'master'
+      ENABLE_LTO:
+        description: '启用 LTO 优化 (可能增加编译时间)'
+        required: false
+        default: 'false'
+        type: boolean
+      EXTRA_CMDS:
+        description: '额外的 make 参数 (可留空)'
+        required: false
+        default: ''
+
+env:
+  # ── 工具链版本 ──────────────────────────────────────────────
+  # Neutron Clang: 高质量 LLVM 工具链，支持 4.19 内核
+  CLANG_VERSION: "19"
+  # ── 编译目标架构 ─────────────────────────────────────────────
+  ARCH: arm64
+  SUBARCH: arm64
+  # ── 输出目录 ─────────────────────────────────────────────────
+  OUT_DIR: out
 
 jobs:
   build:
+    name: 编译 Gauguin 内核
     runs-on: ubuntu-22.04
+    # 最长运行 4 小时（内核编译通常 30-90 分钟）
+    timeout-minutes: 240
 
     steps:
-      - name: Checkout local repo
+      # ── 1. 检出当前仓库（存放脚本配置用）─────────────────────
+      - name: 检出构建仓库
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: Set swap to 10G
-        uses: pierotofy/set-swap-space@master
-        with:
-          swap-size-gb: 10
+      # ── 2. 安装系统依赖 ──────────────────────────────────────
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget zip unzip tar \
+            bc bison flex libssl-dev libelf-dev \
+            make gcc g++ binutils \
+            python3 python3-pip \
+            ccache \
+            adb \
+            libncurses-dev \
+            kmod \
+            cpio \
+            lz4 \
+            zstd \
+            libzstd-dev
 
-      - name: Setup ccache
+      # ── 3. 设置 ccache（加速二次编译）──────────────────────────
+      - name: 配置 ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: gauguin-4.19-sukisu-ultra
-          max-size: 2G
+          key: gauguin-kernel-${{ github.run_id }}
+          restore-keys: gauguin-kernel-
+          max-size: 10G
 
-      - name: Setup environment variables
+      # ── 4. 克隆 Neutron Clang 工具链 ──────────────────────────
+      - name: 下载 Neutron Clang 工具链
         run: |
-          echo "KERNEL_DEFCONFIG=vendor/gauguin_user_defconfig" >> $GITHUB_ENV
-          echo "BUILD_TIME=$(TZ=Asia/Shanghai date '+%Y%m%d%H%M')" >> $GITHUB_ENV
+          mkdir -p ${{ github.workspace }}/toolchain/neutron-clang
 
-      - name: Install build dependencies
+          # 获取最新 release 信息
+          NEUTRON_RELEASE=$(curl -s "https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tag_name'])")
+          echo "Neutron Clang 最新版本: $NEUTRON_RELEASE"
+
+          # 下载对应 tarball
+          wget -q --show-progress \
+            "https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/${NEUTRON_RELEASE}/neutron-clang-${NEUTRON_RELEASE}.tar.zst" \
+            -O /tmp/neutron-clang.tar.zst
+
+          # 解压
+          tar --use-compress-program=unzstd \
+            -xf /tmp/neutron-clang.tar.zst \
+            -C ${{ github.workspace }}/toolchain/neutron-clang
+          rm /tmp/neutron-clang.tar.zst
+
+          # 验证
+          ${{ github.workspace }}/toolchain/neutron-clang/bin/clang --version
+
+      # ── 5. 克隆内核源码 ──────────────────────────────────────
+      - name: 克隆内核源码
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git curl wget flex bison lzop \
-            make bc cpio kmod xz-utils \
-            libssl-dev libelf-dev \
-            python3 python-is-python3 \
-            libncurses-dev rsync unzip ca-certificates
+          echo "克隆 ${{ github.event.inputs.KERNEL_SOURCE }} 分支: ${{ github.event.inputs.KERNEL_BRANCH }}"
+          git clone \
+            --depth=1 \
+            --branch ${{ github.event.inputs.KERNEL_BRANCH }} \
+            ${{ github.event.inputs.KERNEL_SOURCE }} \
+            ${{ github.workspace }}/kernel_source
+          echo "内核源码克隆完成"
+          cd ${{ github.workspace }}/kernel_source
+          echo "内核版本: $(make kernelversion 2>/dev/null || echo '未知')"
 
-      - name: Download toolchains
+      # ── 6. 克隆 AnyKernel3（打包刷机包用）────────────────────
+      - name: 克隆 AnyKernel3
         run: |
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
-          wget -O clang.tar.gz https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20250721-release/Clang-16.0.6-20250721.tar.gz
-          mkdir -p clang
-          tar -xf clang.tar.gz -C clang --strip-components=1
+          git clone \
+            --depth=1 \
+            --branch ${{ github.event.inputs.ANYKERNEL_BRANCH }} \
+            ${{ github.event.inputs.ANYKERNEL_SOURCE }} \
+            ${{ github.workspace }}/AnyKernel3
+          # 清理不需要的文件
+          rm -rf ${{ github.workspace }}/AnyKernel3/.git
 
-      - name: Checkout kernel source
+      # ── 7. 编译内核 ──────────────────────────────────────────
+      - name: 编译内核
+        working-directory: ${{ github.workspace }}/kernel_source
         run: |
-          git clone --depth=1 --branch gauguin-r-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource project
+          # 工具链路径
+          CLANG_DIR="${{ github.workspace }}/toolchain/neutron-clang"
+          PATH="${CLANG_DIR}/bin:${PATH}"
+          export PATH
 
-      - name: Patch kernel Makefile for Android-target clang
+          # ccache 包装
+          export CC="ccache clang"
+          export HOSTCC="ccache gcc"
+          export HOSTCXX="ccache g++"
+
+          # ── 基础编译参数 ─────────────────────────────────────
+          MAKE_ARGS=(
+            O=${OUT_DIR}
+            ARCH=${ARCH}
+            SUBARCH=${SUBARCH}
+            CC="ccache clang"
+            CLANG_TRIPLE="aarch64-linux-gnu-"
+            CROSS_COMPILE="${CLANG_DIR}/bin/aarch64-linux-gnu-"
+            CROSS_COMPILE_ARM32="${CLANG_DIR}/bin/arm-linux-gnueabi-"
+            LD="${CLANG_DIR}/bin/ld.lld"
+            AR="${CLANG_DIR}/bin/llvm-ar"
+            NM="${CLANG_DIR}/bin/llvm-nm"
+            OBJCOPY="${CLANG_DIR}/bin/llvm-objcopy"
+            OBJDUMP="${CLANG_DIR}/bin/llvm-objdump"
+            READELF="${CLANG_DIR}/bin/llvm-readelf"
+            STRIP="${CLANG_DIR}/bin/llvm-strip"
+            LLVM=1
+            LLVM_IAS=1
+          )
+
+          # ── LTO 选项 ─────────────────────────────────────────
+          if [ "${{ github.event.inputs.ENABLE_LTO }}" = "true" ]; then
+            echo "启用 ThinLTO"
+            MAKE_ARGS+=(CONFIG_LTO_CLANG=y CONFIG_THINLTO=y)
+          fi
+
+          # ── 额外参数 ─────────────────────────────────────────
+          if [ -n "${{ github.event.inputs.EXTRA_CMDS }}" ]; then
+            echo "附加参数: ${{ github.event.inputs.EXTRA_CMDS }}"
+          fi
+
+          # ── 1. 生成 defconfig ─────────────────────────────────
+          echo "================================================================"
+          echo " 步骤 1/3: 生成 defconfig (${{ github.event.inputs.KERNEL_DEFCONFIG }})"
+          echo "================================================================"
+          make "${MAKE_ARGS[@]}" \
+            ${{ github.event.inputs.EXTRA_CMDS }} \
+            ${{ github.event.inputs.KERNEL_DEFCONFIG }}
+
+          # ── 2. 编译内核 ───────────────────────────────────────
+          echo "================================================================"
+          echo " 步骤 2/3: 开始编译（使用 $(nproc) 线程）"
+          echo "================================================================"
+          make "${MAKE_ARGS[@]}" \
+            ${{ github.event.inputs.EXTRA_CMDS }} \
+            -j$(nproc --all) \
+            2>&1 | tee /tmp/kernel_build.log
+
+          # ── 3. 检查编译结果 ───────────────────────────────────
+          echo "================================================================"
+          echo " 步骤 3/3: 检查编译产物"
+          echo "================================================================"
+          if [ -f "${OUT_DIR}/arch/arm64/boot/Image.gz" ]; then
+            echo "✅ 编译成功！找到 Image.gz"
+            ls -lh ${OUT_DIR}/arch/arm64/boot/Image* 2>/dev/null || true
+            ls -lh ${OUT_DIR}/arch/arm64/boot/*.gz 2>/dev/null || true
+            # 查找设备树
+            find ${OUT_DIR}/arch/arm64/boot/dts -name "*.dtb" 2>/dev/null | head -5 || true
+            find ${OUT_DIR}/arch/arm64/boot/ -name "dtbo.img" 2>/dev/null | head -3 || true
+          elif [ -f "${OUT_DIR}/arch/arm64/boot/Image" ]; then
+            echo "✅ 编译成功！找到 Image (未压缩)"
+            ls -lh ${OUT_DIR}/arch/arm64/boot/Image*
+          else
+            echo "❌ 未找到内核镜像！编译失败"
+            echo "--- 最后 100 行日志 ---"
+            tail -100 /tmp/kernel_build.log
+            exit 1
+          fi
+
+      # ── 8. 打包 AnyKernel3 刷机包 ────────────────────────────
+      - name: 打包刷机包
         run: |
-          cd project
-          sed -i '/Clang with Android --target detected/d' Makefile
+          KERNEL_DIR="${{ github.workspace }}/kernel_source/${OUT_DIR}/arch/arm64/boot"
+          AK3_DIR="${{ github.workspace }}/AnyKernel3"
+          BUILD_TIME=$(date '+%Y%m%d-%H%M')
 
-      - name: Apply local patch
-        run: |
-          cd project
-          {
-            echo "CONFIG_KSU=y"
-            echo "CONFIG_KSU_MANUAL_HOOK=y"
-            echo "CONFIG_KSU_SUSFS=n"
-          } >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
-          git apply ../ksu_hooks_sukisu_4.19.patch
+          echo "复制内核镜像..."
+          # 优先使用 Image.gz-dtb（一体包），其次 Image.gz，最后 Image
+          if [ -f "${KERNEL_DIR}/Image.gz-dtb" ]; then
+            cp "${KERNEL_DIR}/Image.gz-dtb" "${AK3_DIR}/"
+            echo "使用 Image.gz-dtb"
+          elif [ -f "${KERNEL_DIR}/Image.gz" ]; then
+            cp "${KERNEL_DIR}/Image.gz" "${AK3_DIR}/"
+            echo "使用 Image.gz"
+          elif [ -f "${KERNEL_DIR}/Image" ]; then
+            cp "${KERNEL_DIR}/Image" "${AK3_DIR}/"
+            echo "使用 Image"
+          fi
 
-      - name: Setup SukiSU-Ultra
-        run: |
-          cd project
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-          git config --global user.email "bot@example.com"
-          git config --global user.name "bot"
-          git add .
-          git commit -m "Integrate SukiSU-Ultra" || true
+          # 复制 dtbo.img（如果存在）
+          if [ -f "${KERNEL_DIR}/dtbo.img" ]; then
+            cp "${KERNEL_DIR}/dtbo.img" "${AK3_DIR}/"
+            echo "包含 dtbo.img"
+          fi
 
-      - name: Build kernel
-        run: |
-          cd project
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export KBUILD_BUILD_USER=github
-          export KBUILD_BUILD_HOST=actions
-          export PATH=$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/gcc32/bin:$PATH
+          # 复制 dtb（如果存在独立的 dtb）
+          if [ -f "${KERNEL_DIR}/dtb.img" ]; then
+            cp "${KERNEL_DIR}/dtb.img" "${AK3_DIR}/dtb"
+            echo "包含 dtb"
+          fi
 
-          make O=out \
-            ARCH=arm64 \
-            SUBARCH=arm64 \
-            CC=clang \
-            HOSTCC=gcc \
-            CLANG_TRIPLE=aarch64-linux-android- \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            ${{ env.KERNEL_DEFCONFIG }}
+          # 打包 zip
+          cd "${AK3_DIR}"
+          ZIP_NAME="Kernel-Gauguin-$(git -C ${{ github.workspace }}/kernel_source rev-parse --short HEAD)-${BUILD_TIME}.zip"
+          zip -r9 "${ZIP_NAME}" . \
+            --exclude="*.zip" \
+            --exclude=".git/*" \
+            --exclude="README.md"
 
-          make -j"$(nproc)" O=out \
-            ARCH=arm64 \
-            SUBARCH=arm64 \
-            CC=clang \
-            HOSTCC=gcc \
-            CLANG_TRIPLE=aarch64-linux-android- \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            V=1
+          echo "刷机包: ${ZIP_NAME}"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          echo "AK3_DIR=${AK3_DIR}" >> $GITHUB_ENV
 
-      - name: Show output files
-        if: always()
-        run: |
-          find project/out/arch/arm64/boot -maxdepth 3 -type f | sort || true
-
-      - name: Upload kernel artifacts
+      # ── 9. 上传构建产物 ──────────────────────────────────────
+      - name: 上传内核镜像
         uses: actions/upload-artifact@v4
         with:
-          name: Gauguin_4.19_${{ env.BUILD_TIME }}
+          name: kernel-images-${{ github.run_id }}
           path: |
-            project/out/arch/arm64/boot/Image*
-            project/out/arch/arm64/boot/dtbo.img
-            project/out/arch/arm64/boot/dts/**/*.dtb
+            ${{ github.workspace }}/kernel_source/${{ env.OUT_DIR }}/arch/arm64/boot/Image*
+            ${{ github.workspace }}/kernel_source/${{ env.OUT_DIR }}/arch/arm64/boot/dtbo.img
+            ${{ github.workspace }}/kernel_source/${{ env.OUT_DIR }}/arch/arm64/boot/dtb.img
           if-no-files-found: warn
+          retention-days: 7
+
+      - name: 上传 AnyKernel3 刷机包
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.AK3_DIR }}/${{ env.ZIP_NAME }}
+          retention-days: 7
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_id }}
+          path: /tmp/kernel_build.log
+          retention-days: 3
+
+      # ── 10. 输出构建摘要 ─────────────────────────────────────
+      - name: 输出构建摘要
+        if: always()
+        run: |
+          echo "## 🏗️ 构建摘要" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 内容 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 设备代号 | gauguin (红米 Note 9 Pro 5G) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 内核源码 | ${{ github.event.inputs.KERNEL_SOURCE }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 分支 | ${{ github.event.inputs.KERNEL_BRANCH }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| defconfig | ${{ github.event.inputs.KERNEL_DEFCONFIG }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| LTO | ${{ github.event.inputs.ENABLE_LTO }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 运行时间 | $(date) |" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "${{ github.workspace }}/AnyKernel3/${{ env.ZIP_NAME }}" ]; then
+            echo "| 刷机包 | ✅ ${{ env.ZIP_NAME }} |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| 刷机包 | ❌ 未生成 |" >> $GITHUB_STEP_SUMMARY
+          fi
