@@ -22,7 +22,6 @@ jobs:
 
     - name: Setup Build Environment
       run: |
-        echo "安装编译所需的依赖包..."
         sudo apt-get update
         sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev x11proto-core-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3
 
@@ -34,12 +33,11 @@ jobs:
 
     - name: Download Clang & GCC Toolchains
       run: |
-        echo "拉取 Proton Clang..."
+        # 使用 Proton Clang，它对 4.19 内核支持非常好
         git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
 
     - name: Clone Kernel Source
       run: |
-        echo "拉取内核源码..."
         git clone --depth=1 --branch ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_SOURCE }} kernel-source
 
     - name: Build Kernel
@@ -47,48 +45,67 @@ jobs:
         export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
         cd kernel-source
         
-        # 修复 GCC 10+ 编译 dtc 工具时的 multiple definition 报错
+        # 1. 修复 Host GCC 10+ 的多重定义问题
         export HOSTCFLAGS="-fcommon"
+        export HOSTLDFLAGS="-fcommon"
 
+        # 2. 设置编译环境变量
         export KBUILD_BUILD_USER="builder"
         export KBUILD_BUILD_HOST="github-actions"
 
-        # 提取公共编译参数，加入 LLVM=1 和 LLVM_IAS=1 解决汇编器报错
-        MAKE_ARGS=(
-          -j$(nproc --all)
-          O=out
-          ARCH=${{ env.ARCH }}
-          CC="ccache clang"
-          HOSTCC="gcc"
-          HOSTCXX="g++"
-          CLANG_TRIPLE="aarch64-linux-gnu-"
-          CROSS_COMPILE="aarch64-linux-gnu-"
-          CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
-          LLVM=1
-          LLVM_IAS=1
-        )
+        # 3. 核心修复：使用完整的 LLVM=1 参数
+        # 注意：我们显式指定 LD=ld.lld 和 AS=clang 以绕过那个报错的 'as' 封装
+        make -j$(nproc --all) O=out \
+            ARCH=arm64 \
+            CC="ccache clang" \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            OBJSIZE=llvm-size \
+            READELF=llvm-readelf \
+            HOSTCC=gcc \
+            HOSTCXX=g++ \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            ${{ env.DEFCONFIG }}
 
-        echo "生成 defconfig..."
-        make "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG }}
-
-        echo "开始正式编译内核..."
-        make "${MAKE_ARGS[@]}"
+        echo "开始编译..."
+        make -j$(nproc --all) O=out \
+            ARCH=arm64 \
+            CC="ccache clang" \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            OBJSIZE=llvm-size \
+            READELF=llvm-readelf \
+            HOSTCC=gcc \
+            HOSTCXX=g++ \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 \
+            LLVM_IAS=1
 
     - name: Package with AnyKernel3
       run: |
-        echo "克隆 AnyKernel3 仓库..."
         git clone --depth=1 --branch ${{ env.ANYKERNEL3_BRANCH }} ${{ env.ANYKERNEL3_URL }} AnyKernel3
-        
-        echo "正在寻找并拷贝 Image/Image.gz 和 dtb/dtbo..."
-        find kernel-source/out/arch/arm64/boot -name "Image.gz*" -exec cp {} AnyKernel3/ \;
+        # 针对 4.19 内核，主要的产物通常是 Image.gz 和 dtb
+        find kernel-source/out/arch/arm64/boot -name "Image.gz" -exec cp {} AnyKernel3/ \;
         find kernel-source/out/arch/arm64/boot -name "dtb" -exec cp {} AnyKernel3/ \;
         find kernel-source/out/arch/arm64/boot -name "dtbo.img" -exec cp {} AnyKernel3/ \; || true
 
         cd AnyKernel3
-        zip -r9 AnyKernel3-gauguin-${{ env.KERNEL_BRANCH }}.zip * -x .git README.md *placeholder
+        zip -r9 ../AnyKernel3-gauguin.zip *
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: AnyKernel3-gauguin-kernel
-        path: AnyKernel3/AnyKernel3-gauguin-${{ env.KERNEL_BRANCH }}.zip
+        name: Kernel-RedmiNote9Pro-5G
+        path: AnyKernel3-gauguin.zip
