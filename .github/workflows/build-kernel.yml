@@ -95,8 +95,6 @@ jobs:
           rm -f /tmp/gcc32.tar.xz
 
           "${{ env.CLANG_DIR }}/bin/clang" --version
-          "${{ env.GCC64_DIR }}/bin/aarch64-linux-gcc" --version || true
-          "${{ env.GCC32_DIR }}/bin/arm-linux-gnueabi-gcc" --version || true
 
       - name: 克隆内核源码
         run: |
@@ -110,13 +108,22 @@ jobs:
         working-directory: ${{ github.workspace }}/kernel_source
         shell: bash
         run: |
-          if grep -q "YYLTYPE yylloc;" scripts/dtc/dtc-lexer.l 2>/dev/null; then
-            sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
+          set +e
+
+          if [ -f "scripts/dtc/dtc-lexer.l" ]; then
+            grep -q "YYLTYPE yylloc;" scripts/dtc/dtc-lexer.l
+            if [ $? -eq 0 ]; then
+              sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
+            fi
           fi
 
-          grep -Rnl "stpcpy(" drivers fs include kernel lib mm net sound techpack vendor 2>/dev/null | while read -r f; do
-            sed -i 's/\bstpcpy\s*(/strcpy(/g' "$f"
-          done
+          if [ -d "drivers" ] || [ -d "fs" ] || [ -d "include" ] || [ -d "kernel" ] || [ -d "lib" ] || [ -d "mm" ] || [ -d "net" ] || [ -d "sound" ] || [ -d "techpack" ] || [ -d "vendor" ]; then
+            grep -Rnl "stpcpy(" drivers fs include kernel lib mm net sound techpack vendor 2>/dev/null | while read -r f; do
+              [ -f "$f" ] && sed -i 's/\bstpcpy\s*(/strcpy(/g' "$f"
+            done
+          fi
+
+          set -e
 
       - name: 克隆 AnyKernel3
         run: |
