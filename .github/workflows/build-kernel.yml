@@ -45,53 +45,50 @@ jobs:
         export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
         cd kernel-source
         
-        # 1. 修复 Host GCC 10+ 的多重定义问题
+        # 【关键修复 1】强制删除工具链中那个不兼容的 'as'
+        # 这样执行 CC 时，Clang 找不到外部 as 就会老老实实用自己的 Integrated Assembler
+        rm -f $GITHUB_WORKSPACE/clang/bin/aarch64-linux-gnu-as
+        rm -f $GITHUB_WORKSPACE/clang/bin/arm-linux-gnueabi-as
+        rm -f $GITHUB_WORKSPACE/clang/bin/as
+
+        # 【关键修复 2】设置 Host 端的 CFLAGS 解决 yylloc 重复定义
         export HOSTCFLAGS="-fcommon"
         export HOSTLDFLAGS="-fcommon"
 
-        # 2. 设置编译环境变量
         export KBUILD_BUILD_USER="builder"
         export KBUILD_BUILD_HOST="github-actions"
 
-        # 3. 核心修复：使用完整的 LLVM=1 参数
-        # 注意：我们显式指定 LD=ld.lld 和 AS=clang 以绕过那个报错的 'as' 封装
-        make -j$(nproc --all) O=out \
-            ARCH=arm64 \
-            CC="ccache clang" \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            OBJSIZE=llvm-size \
-            READELF=llvm-readelf \
-            HOSTCC=gcc \
-            HOSTCXX=g++ \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            ${{ env.DEFCONFIG }}
+        # 定义全套 LLVM 工具链参数
+        # 这里的关键是把 AS 设置为 clang，并传入 --target
+        MAKE_ARGS=(
+          ARCH=arm64
+          O=out
+          CC="ccache clang"
+          AS=clang
+          LD=ld.lld
+          AR=llvm-ar
+          NM=llvm-nm
+          OBJCOPY=llvm-objcopy
+          OBJDUMP=llvm-objdump
+          STRIP=llvm-strip
+          READELF=llvm-readelf
+          OBJSIZE=llvm-size
+          HOSTCC=gcc
+          HOSTCXX=g++
+          CROSS_COMPILE=aarch64-linux-gnu-
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          CLANG_TRIPLE=aarch64-linux-gnu-
+          LLVM=1
+          LLVM_IAS=1
+        )
 
-        echo "开始编译..."
-        make -j$(nproc --all) O=out \
-            ARCH=arm64 \
-            CC="ccache clang" \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            OBJSIZE=llvm-size \
-            READELF=llvm-readelf \
-            HOSTCC=gcc \
-            HOSTCXX=g++ \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LLVM=1 \
-            LLVM_IAS=1
+        echo "生成 defconfig..."
+        make -j$(nproc --all) "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG }}
+
+        echo "开始正式编译..."
+        # 如果依然在 scripts/mod 报错，尝试在这里加上 V=1 看看详细命令
+        make -j$(nproc --all) "${MAKE_ARGS[@]}"
+        
 
     - name: Package with AnyKernel3
       run: |
