@@ -97,7 +97,7 @@ jobs:
         git clone --depth=1 --branch ${{ env.ANYKERNEL3_BRANCH }} ${{ env.ANYKERNEL3_URL }} AnyKernel3
         
         # 寻找内核产物
-        find kernel-source/out/arch/arm64/boot -name "Image.gz*" -exec cp {} AnyKernel3/ \;
+        find kernel-source/out/arch/arm64/boot -name "Image*" -exec cp {} AnyKernel3/ \;
         find kernel-source/out/arch/arm64/boot -name "dtb" -exec cp {} AnyKernel3/ \;
         find kernel-source/out/arch/arm64/boot -name "dtbo.img" -exec cp {} AnyKernel3/ \; || true
 
