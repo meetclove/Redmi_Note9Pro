@@ -51,6 +51,11 @@ jobs:
         run: |
           git clone --depth=1 --branch gauguin-r-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource project
 
+      - name: Patch kernel Makefile for Android-target clang
+        run: |
+          cd project
+          sed -i '/Clang with Android --target detected/d' Makefile
+
       - name: Apply local patch
         run: |
           cd project
@@ -84,6 +89,7 @@ jobs:
             SUBARCH=arm64 \
             CC=clang \
             HOSTCC=gcc \
+            CLANG_TRIPLE=aarch64-linux-android- \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             ${{ env.KERNEL_DEFCONFIG }}
@@ -93,6 +99,7 @@ jobs:
             SUBARCH=arm64 \
             CC=clang \
             HOSTCC=gcc \
+            CLANG_TRIPLE=aarch64-linux-android- \
             CROSS_COMPILE=aarch64-linux-android- \
             CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             V=1
