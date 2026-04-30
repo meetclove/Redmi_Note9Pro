@@ -57,7 +57,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             git curl wget zip unzip tar xz-utils \
             bc bison flex libssl-dev libelf-dev \
-            make gcc g++ binutils \
+            make gcc g++ binutils patch \
             python3 python3-pip \
             ccache \
             adb \
@@ -95,6 +95,8 @@ jobs:
           rm -f /tmp/gcc32.tar.xz
 
           "${{ env.CLANG_DIR }}/bin/clang" --version
+          "${{ env.GCC64_DIR }}/bin/aarch64-linux-gcc" --version || true
+          "${{ env.GCC32_DIR }}/bin/arm-linux-gnueabi-gcc" --version || true
 
       - name: 克隆内核源码
         run: |
@@ -104,13 +106,17 @@ jobs:
             "${{ github.event.inputs.KERNEL_SOURCE }}" \
             "${{ github.workspace }}/kernel_source"
 
-      - name: 修复 dtc yylloc 重定义
+      - name: 修复源码兼容性
         working-directory: ${{ github.workspace }}/kernel_source
         shell: bash
         run: |
           if grep -q "YYLTYPE yylloc;" scripts/dtc/dtc-lexer.l 2>/dev/null; then
             sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
           fi
+
+          grep -Rnl "stpcpy(" drivers fs include kernel lib mm net sound techpack vendor 2>/dev/null | while read -r f; do
+            sed -i 's/\bstpcpy\s*(/strcpy(/g' "$f"
+          done
 
       - name: 克隆 AnyKernel3
         run: |
@@ -148,14 +154,13 @@ jobs:
             CLANG_TRIPLE="aarch64-linux-gnu-"
             CROSS_COMPILE="aarch64-linux-"
             CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
-            LD="ld.lld"
+            LD="${{ env.GCC64_DIR }}/bin/aarch64-linux-ld.bfd"
             AR="llvm-ar"
             NM="llvm-nm"
             OBJCOPY="llvm-objcopy"
             OBJDUMP="llvm-objdump"
             READELF="llvm-readelf"
             STRIP="llvm-strip"
-            LLVM=1
             LLVM_IAS=1
           )
 
