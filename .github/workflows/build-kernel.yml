@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
 
 env:
-  KERNEL_SOURCE: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
-  KERNEL_BRANCH: gauguin-r-oss
-  DEFCONFIG: vendor/gauguin_user_defconfig
+  KERNEL_SOURCE: https://github.com/Fucking-Projekt/deprecated-kernel-gauguin
+  KERNEL_BRANCH: 16
+  DEFCONFIG: gauguin_defconfig
   ANYKERNEL3_URL: https://github.com/osm0sis/AnyKernel3
   ANYKERNEL3_BRANCH: master
 
