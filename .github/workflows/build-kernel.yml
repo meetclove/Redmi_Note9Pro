@@ -55,28 +55,31 @@ jobs:
         cd kernel-source
         
         # ============================================================
-        # 保留 stpcpy 修复补丁：防止 vmlinux 链接阶段找不到符号
+        # 终极修复：全局搜索并删除 AOSP 魔改的未识别警告参数
+        # ============================================================
+        echo "正在清理不支持的 Clang 警告参数..."
+        grep -rl -- "-Wno-default-const-init-var-unsafe" . | xargs sed -i 's/-Wno-default-const-init-var-unsafe//g' || true
+        grep -rl -- "-Wno-default-const-init-field-unsafe" . | xargs sed -i 's/-Wno-default-const-init-field-unsafe//g' || true
+
+        # ============================================================
+        # 保留 stpcpy 修复补丁
         # ============================================================
         echo "正在应用 stpcpy 修复补丁..."
         TARGET_FILE="drivers/tty/tty_io.c"
         if [ -f "$TARGET_FILE" ]; then
             sed -i '1i char *stpcpy(char *dest, const char *src); char *stpcpy(char *dest, const char *src) { while ((*dest = *src)) { dest++; src++; } return dest; }' "$TARGET_FILE"
         fi
-        # ============================================================
 
         export HOSTCFLAGS="-fcommon"
         export HOSTLDFLAGS="-fcommon"
         export KBUILD_BUILD_USER="builder"
         export KBUILD_BUILD_HOST="github-actions"
 
-        # ============================================================
-        # 核心修复点：在 CC 变量中强制注入 -Wno-unknown-warning-option
-        # 这样 Clang 遇到 AOSP 专属的魔改警告参数时，就会直接无视，不再中断编译
-        # ============================================================
+        # 恢复正常的参数，不再需要强行注入
         MAKE_ARGS=(
           ARCH=arm64
           O=out
-          CC="ccache clang -Wno-unknown-warning-option"
+          CC="ccache clang"
           CLANG_TRIPLE=aarch64-linux-gnu-
           CROSS_COMPILE=aarch64-linux-android-
           CROSS_COMPILE_ARM32=arm-linux-androideabi-
