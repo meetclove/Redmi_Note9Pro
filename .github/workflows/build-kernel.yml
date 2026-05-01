@@ -33,13 +33,14 @@ jobs:
 
     - name: Download Clang & AOSP GCC Toolchains
       run: |
-        echo "1. 拉取 Proton Clang (作为核心 C 编译器)..."
-        git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+        echo "1. 拉取 Azure Clang (替代老旧的 Proton Clang，支持新版内核警告参数)..."
+        # 使用 Azure Clang，它包含了较新的 LLVM/Clang 版本
+        git clone --depth=1 https://gitlab.com/Panchajanya1999/azure-clang.git clang
 
-        echo "2. 拉取 LineageOS 官方 AOSP GCC 64-bit (提供原生的 as 和 ld)..."
+        echo "2. 拉取 LineageOS 官方 AOSP GCC 64-bit..."
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc-64
 
-        echo "3. 拉取 LineageOS 官方 AOSP GCC 32-bit (用于 VDSO 和 32 位兼容层编译)..."
+        echo "3. 拉取 LineageOS 官方 AOSP GCC 32-bit..."
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-32
 
     - name: Clone Kernel Source
@@ -49,32 +50,27 @@ jobs:
 
     - name: Build Kernel (Clang + GCC)
       run: |
-        # 将 Clang 和原版 GCC 工具链全部加入环境变量
+        # 环境变量路径保持不变，Azure Clang 也是在 bin 目录下
         export PATH="$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc-64/bin:$GITHUB_WORKSPACE/gcc-32/bin:$PATH"
         cd kernel-source
         
         # ============================================================
-        # 修复补丁：解决内核链接阶段找不到 stpcpy 的报错
+        # 保留 stpcpy 修复补丁：防止 vmlinux 链接阶段找不到符号
         # ============================================================
         echo "正在应用 stpcpy 修复补丁..."
         TARGET_FILE="drivers/tty/tty_io.c"
         if [ -f "$TARGET_FILE" ]; then
-            # 在文件开头插入 stpcpy 实现，防止编译器自动优化导致的符号缺失
             sed -i '1i char *stpcpy(char *dest, const char *src); char *stpcpy(char *dest, const char *src) { while ((*dest = *src)) { dest++; src++; } return dest; }' "$TARGET_FILE"
-            echo "补丁应用成功！"
-        else
-            echo "警告：未找到 $TARGET_FILE，请确认源码结构。"
         fi
         # ============================================================
 
-        # 修复 Ubuntu 22.04 Host GCC 11+ 的 dtc 编译 multiple definition 错误
         export HOSTCFLAGS="-fcommon"
         export HOSTLDFLAGS="-fcommon"
-
         export KBUILD_BUILD_USER="builder"
         export KBUILD_BUILD_HOST="github-actions"
 
-        # 指明使用 Clang，但交叉编译链使用 AOSP GCC
+        # 移除了刚才加的 KCFLAGS="-Wno-unknown-warning-option"
+        # 因为新的 Clang 已经能原生识别内核源码里的那些新参数了
         MAKE_ARGS=(
           ARCH=arm64
           O=out
@@ -88,7 +84,6 @@ jobs:
         make -j$(nproc --all) "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG }}
 
         echo "开始正式混合编译内核..."
-        # 这里会执行到最终的链接步骤，此时 stpcpy 已经就绪[cite: 1]
         make -j$(nproc --all) "${MAKE_ARGS[@]}"
 
     - name: Package with AnyKernel3
