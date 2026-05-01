@@ -50,7 +50,7 @@ jobs:
 
     - name: Build Kernel (Clang + GCC)
       run: |
-        # 环境变量路径保持不变，Azure Clang 也是在 bin 目录下
+        # 环境变量路径保持不变
         export PATH="$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc-64/bin:$GITHUB_WORKSPACE/gcc-32/bin:$PATH"
         cd kernel-source
         
@@ -69,12 +69,14 @@ jobs:
         export KBUILD_BUILD_USER="builder"
         export KBUILD_BUILD_HOST="github-actions"
 
-        # 移除了刚才加的 KCFLAGS="-Wno-unknown-warning-option"
-        # 因为新的 Clang 已经能原生识别内核源码里的那些新参数了
+        # ============================================================
+        # 核心修复点：在 CC 变量中强制注入 -Wno-unknown-warning-option
+        # 这样 Clang 遇到 AOSP 专属的魔改警告参数时，就会直接无视，不再中断编译
+        # ============================================================
         MAKE_ARGS=(
           ARCH=arm64
           O=out
-          CC="ccache clang"
+          CC="ccache clang -Wno-unknown-warning-option"
           CLANG_TRIPLE=aarch64-linux-gnu-
           CROSS_COMPILE=aarch64-linux-android-
           CROSS_COMPILE_ARM32=arm-linux-androideabi-
