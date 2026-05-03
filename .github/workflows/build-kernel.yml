@@ -6,7 +6,7 @@ on:
 env:
   KERNEL_SOURCE: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
   KERNEL_BRANCH: pipa-t-oss
-  DEFCONFIG: pipa_user_defconfig
+  DEFCONFIG: vendor/pipa_user_defconfig
   ANYKERNEL3_URL: https://github.com/osm0sis/AnyKernel3
   ANYKERNEL3_BRANCH: master
 
